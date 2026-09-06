@@ -1,0 +1,113 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate project
+        shell: bash
+        run: |
+          set -e
+
+          echo "===== Repository files ====="
+          find . -maxdepth 4 -type f | sort | head -300
+
+          PKG=$(find . -type f -name package.json \
+            -not -path './node_modules/*' | head -1 || true)
+
+          # If the ZIP itself was uploaded to GitHub, extract it.
+          if [ -z "$PKG" ]; then
+            ZIP=$(find . -maxdepth 3 -type f -iname '*.zip' \
+              -not -path './node_modules/*' | head -1 || true)
+
+            if [ -n "$ZIP" ]; then
+              echo "No package.json found; extracting $ZIP..."
+              mkdir -p .github/_extracted_project
+              unzip -q "$ZIP" -d .github/_extracted_project
+
+              PKG=$(find .github/_extracted_project \
+                -type f -name package.json | head -1 || true)
+            fi
+          fi
+
+          if [ -z "$PKG" ]; then
+            echo "::error::package.json was not found."
+            exit 1
+          fi
+
+          PROJECT_DIR=$(dirname "$PKG")
+          PROJECT_DIR=${PROJECT_DIR#./}
+
+          [ -n "$PROJECT_DIR" ] || PROJECT_DIR="."
+
+          echo "Using project directory: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses || true
+
+      - name: Install Node dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm install
+
+      - name: Validate Node project
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm run build
+
+      - name: Create Android project
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -d android ]; then
+            echo "Android project already exists."
+          else
+            npx cap add android
+          fi
+
+      - name: Sync Capacitor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap sync android
+
+      - name: Make Gradle executable
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: chmod +x android/gradlew
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: ./gradlew assembleDebug --stacktrace --warning-mode all
+
+      - name: Find APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          find android/app/build/outputs -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: titonox-transcript-ai-debug-apk
+          path: ${{ env.PROJECT_DIR }}/android/app/build/outputs/**/*.apk
+          if-no-files-found: error
+          retention-days: 14
